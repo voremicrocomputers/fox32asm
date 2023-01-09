@@ -26,11 +26,11 @@ struct Fox32Parser;
 // this is kinda dumb, but oh well !!
 lazy_static! {
     static ref SOURCE_PATH: Mutex<PathBuf> = Mutex::new(PathBuf::new());
-    static ref CURRENT_SIZE: Mutex<Size> = Mutex::new(Size::Word);
+    static ref CURRENT_SIZE: Mutex<Size> = Mutex::new(Size::Long);
     static ref CURRENT_CONDITION: Mutex<Condition> = Mutex::new(Condition::Always);
     static ref LABEL_TARGETS: Mutex<HashMap<String, Vec<BackpatchTarget>>> = Mutex::new(HashMap::new());
-    static ref LABEL_ADDRESSES: Mutex<HashMap<String, (u32, bool)>> = Mutex::new(HashMap::new());
-    static ref RELOC_ADDRESSES: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+    static ref LABEL_ADDRESSES: Mutex<HashMap<String, (u64, bool)>> = Mutex::new(HashMap::new());
+    static ref RELOC_ADDRESSES: Mutex<Vec<u64>> = Mutex::new(Vec::new());
 }
 
 //const FXF_CODE_SIZE:   usize = 0x00000004;
@@ -54,13 +54,13 @@ impl BackpatchTarget {
         }
     }
 
-    fn write(&self, size: Size, address: u32) {
+    fn write(&self, size: Size, address: u64) {
         let ref instruction = self.instruction;
         let mut instruction_data = instruction.borrow_mut();
 
         let address_bytes =
             if self.is_relative {
-                (address as i32 - self.instruction.get_address() as i32).to_le_bytes()
+                (address as i64 - self.instruction.get_address() as i64).to_le_bytes()
             } else {
                 address.to_le_bytes()
             };
@@ -77,15 +77,25 @@ impl BackpatchTarget {
                 instruction_data[self.index + 2] = address_bytes[2];
                 instruction_data[self.index + 3] = address_bytes[3];
             }
+            Size::Long => {
+                instruction_data[self.index]     = address_bytes[0];
+                instruction_data[self.index + 1] = address_bytes[1];
+                instruction_data[self.index + 2] = address_bytes[2];
+                instruction_data[self.index + 3] = address_bytes[3];
+                instruction_data[self.index + 4] = address_bytes[4];
+                instruction_data[self.index + 5] = address_bytes[5];
+                instruction_data[self.index + 6] = address_bytes[6];
+                instruction_data[self.index + 7] = address_bytes[7];
+            }
         }
     }
 
-    fn get_backpatch_location(&self) -> u32 {
-        self.instruction.get_address() + self.index as u32
+    fn get_backpatch_location(&self) -> u64 {
+        self.instruction.get_address() + self.index as u64
     }
 }
 
-fn perform_backpatching(targets: &Vec<BackpatchTarget>, address: (u32, bool)) {
+fn perform_backpatching(targets: &Vec<BackpatchTarget>, address: (u64, bool)) {
     for target in targets {
         target.write(target.size, address.0);
 
@@ -100,7 +110,7 @@ fn perform_backpatching(targets: &Vec<BackpatchTarget>, address: (u32, bool)) {
 #[derive(Debug, Clone, Default)]
 struct AssembledInstruction {
     value: Rc<RefCell<Vec<u8>>>,
-    address: Rc<Cell<u32>>,
+    address: Rc<Cell<u64>>,
 }
 
 impl AssembledInstruction {
@@ -111,10 +121,10 @@ impl AssembledInstruction {
         }
     }
 
-    fn get_address(&self) -> u32 {
+    fn get_address(&self) -> u64 {
         self.address.get()
     }
-    fn set_address(&self, address: u32) {
+    fn set_address(&self, address: u64) {
         self.address.set(address);
     }
 }
@@ -163,6 +173,8 @@ enum InstructionZero {
     Icl,
     Mse,
     Mcl,
+    Rse,
+    Rcl,
 }
 
 #[derive(PartialEq, Debug, Clone, Copy)]
@@ -209,6 +221,8 @@ enum InstructionTwo {
     Rta,
     In,
     Out,
+    Ldl,
+    Bind,
 }
 
 #[derive(PartialEq, Debug, Clone, Copy)]
@@ -216,6 +230,7 @@ enum Size {
     Byte,
     Half,
     Word,
+    Long,
 }
 
 #[derive(PartialEq, Debug, Clone, Copy)]
@@ -261,13 +276,14 @@ enum AstNode {
     Immediate8(u8),
     Immediate16(u16),
     Immediate32(u32),
+    Immediate64(u64),
     Register(u8),
-    ImmediatePointer(u32),
+    ImmediatePointer(u64),
     RegisterPointer(u8),
 
     Constant {
         name: String,
-        address: u32,
+        address: u64,
     },
 
     LabelDefine {
@@ -287,24 +303,25 @@ enum AstNode {
     DataByte(u8),
     DataHalf(u16),
     DataWord(u32),
+    DataLong(u64),
     DataStr(String),
     DataFill {
         value: u8,
-        size: u32,
+        size: u64,
     },
 
     IncludedBinary(Vec<u8>),
 
-    Origin(u32),
-    OriginPadded(u32),
+    Origin(u64),
+    OriginPadded(u64),
 }
 
-fn format_address_table(m: &HashMap<String, (u32, bool)>) -> String {
-    let mut v: Vec<(&String, &u32)> = Vec::new();
+fn format_address_table(m: &HashMap<String, (u64, bool)>) -> String {
+    let mut v: Vec<(&String, &u64)> = Vec::new();
     for i in m.into_iter() {
         v.push((i.0, &i.1.0));
     }
-    v.sort_by(|(_, v1), (_, v2)| u32::cmp(v1, v2));
+    v.sort_by(|(_, v1), (_, v2)| u64::cmp(v1, v2));
     v.iter().map(|(k, v)| format!("{:#010X?} :: {}", v, k)).collect::<Vec<String>>().join("\n")
 }
 
@@ -350,7 +367,7 @@ fn main() {
     let ast = parse(&input_file);
 
     let mut instructions: Vec<AssembledInstruction> = Vec::new();
-    let mut current_address: u32 = 0;
+    let mut current_address: u64 = 0;
 
     println!("Assembling...");
     for node in ast.unwrap() {
@@ -374,12 +391,12 @@ fn main() {
             current_address += size;
             instructions.push(vec![value; size as usize].into());
         } else if let AstNode::IncludedBinary(binary_vec) = node {
-            current_address += binary_vec.len() as u32;
+            current_address += binary_vec.len() as u64;
             instructions.push(binary_vec.into());
         } else {
             let instruction = assemble_node(node);
             instruction.set_address(current_address);
-            current_address += instruction.borrow().len() as u32;
+            current_address += instruction.borrow().len() as u64;
             instructions.push(instruction);
         }
     }
@@ -413,14 +430,14 @@ fn main() {
         }
 
         // code size
-        binary.extend_from_slice(&u32::to_le_bytes(code_size as u32));
+        binary.extend_from_slice(&u64::to_le_bytes(code_size as u64));
         // code pointer
-        binary.extend_from_slice(&u32::to_le_bytes(0x14)); // code starts after the header
+        binary.extend_from_slice(&u64::to_le_bytes(0x14)); // code starts after the header
 
         // reloc table size
-        binary.extend_from_slice(&u32::to_le_bytes(0));
+        binary.extend_from_slice(&u64::to_le_bytes(0));
         // reloc table pointer
-        binary.extend_from_slice(&u32::to_le_bytes(0));
+        binary.extend_from_slice(&u64::to_le_bytes(0));
     }
 
     for instruction in instructions {
@@ -430,29 +447,37 @@ fn main() {
     // if we're generating a FXF binary, write the reloc table
     if is_fxf {
         // first get the current pointer to where we are in the binary
-        let reloc_ptr_bytes = u32::to_le_bytes(binary.len() as u32);
+        let reloc_ptr_bytes = u64::to_le_bytes(binary.len() as u64);
 
         // write the reloc addresses to the end of the binary
         let reloc_table = &*RELOC_ADDRESSES.lock().unwrap();
         let mut reloc_table_size = 0;
         for address in reloc_table {
-            let address_bytes = u32::to_le_bytes(*address);
+            let address_bytes = u64::to_le_bytes(*address);
             binary.extend_from_slice(&address_bytes);
             reloc_table_size += 4;
         }
 
         // write the reloc size to the FXF header
-        let reloc_table_size_bytes = u32::to_le_bytes(reloc_table_size);
+        let reloc_table_size_bytes = u64::to_le_bytes(reloc_table_size);
         binary[FXF_RELOC_SIZE]     = reloc_table_size_bytes[0];
         binary[FXF_RELOC_SIZE + 1] = reloc_table_size_bytes[1];
         binary[FXF_RELOC_SIZE + 2] = reloc_table_size_bytes[2];
         binary[FXF_RELOC_SIZE + 3] = reloc_table_size_bytes[3];
+        binary[FXF_RELOC_SIZE + 4] = reloc_table_size_bytes[4];
+        binary[FXF_RELOC_SIZE + 5] = reloc_table_size_bytes[5];
+        binary[FXF_RELOC_SIZE + 6] = reloc_table_size_bytes[6];
+        binary[FXF_RELOC_SIZE + 7] = reloc_table_size_bytes[7];
 
         // write the reloc pointer to the FXF header
         binary[FXF_RELOC_PTR]     = reloc_ptr_bytes[0];
         binary[FXF_RELOC_PTR + 1] = reloc_ptr_bytes[1];
         binary[FXF_RELOC_PTR + 2] = reloc_ptr_bytes[2];
         binary[FXF_RELOC_PTR + 3] = reloc_ptr_bytes[3];
+        binary[FXF_RELOC_PTR + 4] = reloc_ptr_bytes[4];
+        binary[FXF_RELOC_PTR + 5] = reloc_ptr_bytes[5];
+        binary[FXF_RELOC_PTR + 6] = reloc_ptr_bytes[6];
+        binary[FXF_RELOC_PTR + 7] = reloc_ptr_bytes[7];
     }
 
     println!("Final binary size: {} bytes = {:.2} KiB = {:.2} MiB", binary.len(), binary.len() / 1024, binary.len() / 1048576);
@@ -560,13 +585,13 @@ fn build_ast_from_expression(pair: pest::iterators::Pair<Rule>) -> AstNode {
 }
 
 fn parse_constant(pairs: pest::iterators::Pairs<Rule>) -> AstNode {
-    *CURRENT_SIZE.lock().unwrap() = Size::Word;
+    *CURRENT_SIZE.lock().unwrap() = Size::Long;
     let mut pairs = pairs;
     let constant_name = pairs.next().unwrap().into_inner().next().unwrap().as_str();
     let operand_pair = pairs.next().unwrap();
     let operand_ast = parse_operand(operand_pair, false);
 
-    if let AstNode::Immediate32(address) = operand_ast {
+    if let AstNode::Immediate64(address) = operand_ast {
         AstNode::Constant {
             name: constant_name.to_string(),
             address,
@@ -599,25 +624,32 @@ fn parse_data(pair: pest::iterators::Pair<Rule>) -> AstNode {
     match pair.as_rule() {
         Rule::data_byte => {
             match parse_operand(pair.into_inner().next().unwrap(), false) {
-                AstNode::Immediate32(half) => AstNode::DataByte(half as u8),
+                AstNode::Immediate64(half) => AstNode::DataByte(half as u8),
                 AstNode::LabelOperand {name, size, is_relative} => AstNode::LabelOperand {name, size, is_relative},
                 _ => unreachable!(),
             }
         },
         Rule::data_half => {
             match parse_operand(pair.into_inner().next().unwrap(), false) {
-                AstNode::Immediate32(half) => AstNode::DataHalf(half as u16),
+                AstNode::Immediate64(half) => AstNode::DataHalf(half as u16),
                 AstNode::LabelOperand {name, size, is_relative} => AstNode::LabelOperand {name, size, is_relative},
                 _ => unreachable!(),
             }
         },
         Rule::data_word => {
             match parse_operand(pair.into_inner().next().unwrap(), false) {
-                AstNode::Immediate32(word) => AstNode::DataWord(word),
+                AstNode::Immediate64(word) => AstNode::DataWord(word as u32),
                 AstNode::LabelOperand {name, size, is_relative} => AstNode::LabelOperand {name, size, is_relative},
                 _ => unreachable!(),
             }
         },
+        Rule::data_long => {
+            match parse_operand(pair.into_inner().next().unwrap(), false) {
+                AstNode::Immediate64(word) => AstNode::DataLong(word),
+                AstNode::LabelOperand {name, size, is_relative} => AstNode::LabelOperand {name, size, is_relative},
+                _ => unreachable!(),
+            }
+        }
         Rule::data_str => {
             let string = pair.into_inner().next().unwrap().into_inner().next().unwrap().as_str();
             AstNode::DataStr(string.to_string())
@@ -633,13 +665,21 @@ fn parse_data(pair: pest::iterators::Pair<Rule>) -> AstNode {
             };
             let size = {
                 let ast = parse_operand(pair.into_inner().nth(1).unwrap(), false);
-                if let AstNode::Immediate32(word) = ast {
+                if let AstNode::Immediate64(word) = ast {
                     word
                 } else {
                     unreachable!()
                 }
             };
             AstNode::DataFill {value, size}
+        },
+        Rule::data_extern => {
+            let name = pair.into_inner().next().unwrap().into_inner().next().unwrap().as_str();
+            AstNode::DataStr(name.to_string() + "\0")
+        },
+        Rule::data_lib => {
+            let name = pair.into_inner().next().unwrap().into_inner().next().unwrap().as_str();
+            AstNode::DataStr(name.to_string() + "\0")
         },
         _ => panic!("Unsupported data: {}", pair.as_str()),
     }
@@ -651,7 +691,7 @@ fn parse_origin(pair: pest::iterators::Pair<Rule>) -> AstNode {
         Rule::origin_no_padding => {
             let ast = parse_operand(pair.into_inner().next().unwrap(), false);
             let address = {
-                if let AstNode::Immediate32(word) = ast {
+                if let AstNode::Immediate64(word) = ast {
                     word
                 } else {
                     unreachable!()
@@ -662,7 +702,7 @@ fn parse_origin(pair: pest::iterators::Pair<Rule>) -> AstNode {
         Rule::origin_padding => {
             let ast = parse_operand(pair.into_inner().next().unwrap(), false);
             let address = {
-                if let AstNode::Immediate32(word) = ast {
+                if let AstNode::Immediate64(word) = ast {
                     word
                 } else {
                     unreachable!()
@@ -679,6 +719,7 @@ fn parse_size(pair: &pest::iterators::Pair<Rule>) -> Size {
         ".8" => Size::Byte,
         ".16" => Size::Half,
         ".32" => Size::Word,
+        ".64" => Size::Long,
         _ => panic!("Unsupported size: {}", pair.as_str()),
     }
 }
@@ -699,7 +740,7 @@ fn parse_condition(pair: &pest::iterators::Pair<Rule>) -> Condition {
 
 fn parse_instruction(pair: pest::iterators::Pair<Rule>) -> AstNode {
     //println!("parse_instruction: {:#?}", pair); // debug
-    let mut size = Size::Word;
+    let mut size = Size::Long;
     let condition = *CURRENT_CONDITION.lock().unwrap();
     match pair.as_rule() {
         Rule::instruction_conditional => {
@@ -752,53 +793,57 @@ fn parse_operand(mut pair: pest::iterators::Pair<Rule>, is_pointer: bool) -> Ast
             match operand_value_pair.as_rule() {
                 Rule::immediate_bin => {
                     let body_bin_str = operand_value_pair.into_inner().next().unwrap().as_str();
-                    let immediate = u32::from_str_radix(&remove_underscores(body_bin_str), 2).unwrap();
+                    let immediate = u64::from_str_radix(&remove_underscores(body_bin_str), 2).unwrap();
                     if is_pointer {
                         AstNode::ImmediatePointer(immediate)
                     } else {
                         match size {
                             Size::Byte => AstNode::Immediate8(immediate as u8),
                             Size::Half => AstNode::Immediate16(immediate as u16),
-                            Size::Word => AstNode::Immediate32(immediate),
+                            Size::Word => AstNode::Immediate32(immediate as u32),
+                            Size::Long => AstNode::Immediate64(immediate),
                         }
                     }
                 }
                 Rule::immediate_hex => {
                     let body_hex_str = operand_value_pair.into_inner().next().unwrap().as_str();
-                    let immediate = u32::from_str_radix(&remove_underscores(body_hex_str), 16).unwrap();
+                    let immediate = u64::from_str_radix(&remove_underscores(body_hex_str), 16).unwrap();
                     if is_pointer {
                         AstNode::ImmediatePointer(immediate)
                     } else {
                         match size {
                             Size::Byte => AstNode::Immediate8(immediate as u8),
                             Size::Half => AstNode::Immediate16(immediate as u16),
-                            Size::Word => AstNode::Immediate32(immediate),
+                            Size::Word => AstNode::Immediate32(immediate as u32),
+                            Size::Long => AstNode::Immediate64(immediate),
                         }
                     }
                 }
                 Rule::immediate_dec => {
                     let body_dec_str = operand_value_pair.into_inner().next().unwrap().as_str();
-                    let immediate = remove_underscores(body_dec_str).parse::<u32>().unwrap();
+                    let immediate = remove_underscores(body_dec_str).parse::<u64>().unwrap();
                     if is_pointer {
                         AstNode::ImmediatePointer(immediate)
                     } else {
                         match size {
                             Size::Byte => AstNode::Immediate8(immediate as u8),
                             Size::Half => AstNode::Immediate16(immediate as u16),
-                            Size::Word => AstNode::Immediate32(immediate),
+                            Size::Word => AstNode::Immediate32(immediate as u32),
+                            Size::Long => AstNode::Immediate64(immediate),
                         }
                     }
                 }
                 Rule::immediate_char => {
                     let body_char_str = operand_value_pair.into_inner().next().unwrap().as_str();
-                    let immediate = body_char_str.chars().nth(0).unwrap() as u8 as u32;
+                    let immediate = body_char_str.chars().nth(0).unwrap() as u8 as u64;
                     if is_pointer {
                         AstNode::ImmediatePointer(immediate)
                     } else {
                         match size {
                             Size::Byte => AstNode::Immediate8(immediate as u8),
                             Size::Half => AstNode::Immediate16(immediate as u16),
-                            Size::Word => AstNode::Immediate32(immediate),
+                            Size::Word => AstNode::Immediate32(immediate as u32),
+                            Size::Long => AstNode::Immediate64(immediate),
                         }
                     }
                 }
@@ -849,6 +894,8 @@ fn parse_instruction_zero(pair: pest::iterators::Pair<Rule>, condition: Conditio
             "icl"  => InstructionZero::Icl,
             "mse"  => InstructionZero::Mse,
             "mcl"  => InstructionZero::Mcl,
+            "rse"  => InstructionZero::Rse,
+            "rcl"  => InstructionZero::Rcl,
             _ => panic!("Unsupported conditional instruction (zero): {}", pair.as_str()),
         },
     }
@@ -949,6 +996,8 @@ fn parse_instruction_two(pair: pest::iterators::Pair<Rule>, mut lhs: AstNode, mu
             }
             "in"   => InstructionTwo::In,
             "out"  => InstructionTwo::Out,
+            "ldl"  => InstructionTwo::Ldl,
+            "bind" => InstructionTwo::Bind,
             _ => panic!("Unsupported conditional instruction (two): {}", pair.as_str()),
         },
         lhs: Box::new(lhs),
@@ -1008,6 +1057,7 @@ fn size_to_byte(size: &Size) -> u8 {
         Size::Byte => 0b00000000,
         Size::Half => 0b01000000,
         Size::Word => 0b10000000,
+        Size::Long => 0b11000000,
     }
 }
 
@@ -1015,15 +1065,17 @@ fn instruction_to_byte(node: &AstNode) -> u8 {
     match node {
         AstNode::OperationZero {instruction, ..} => {
             match instruction {
-                InstructionZero::Nop  => 0x00 | size_to_byte(&Size::Word),
-                InstructionZero::Halt => 0x10 | size_to_byte(&Size::Word),
-                InstructionZero::Brk  => 0x20 | size_to_byte(&Size::Word),
-                InstructionZero::Ret  => 0x2A | size_to_byte(&Size::Word),
-                InstructionZero::Reti => 0x3A | size_to_byte(&Size::Word),
-                InstructionZero::Ise  => 0x0C | size_to_byte(&Size::Word),
-                InstructionZero::Icl  => 0x1C | size_to_byte(&Size::Word),
-                InstructionZero::Mse  => 0x0D | size_to_byte(&Size::Word),
-                InstructionZero::Mcl  => 0x1D | size_to_byte(&Size::Word),
+                InstructionZero::Nop  => 0x00 | size_to_byte(&Size::Long),
+                InstructionZero::Halt => 0x10 | size_to_byte(&Size::Long),
+                InstructionZero::Brk  => 0x20 | size_to_byte(&Size::Long),
+                InstructionZero::Ret  => 0x2A | size_to_byte(&Size::Long),
+                InstructionZero::Reti => 0x3A | size_to_byte(&Size::Long),
+                InstructionZero::Ise  => 0x0C | size_to_byte(&Size::Long),
+                InstructionZero::Icl  => 0x1C | size_to_byte(&Size::Long),
+                InstructionZero::Mse  => 0x0D | size_to_byte(&Size::Long),
+                InstructionZero::Mcl  => 0x1D | size_to_byte(&Size::Long),
+                InstructionZero::Rse  => 0x2E | size_to_byte(&Size::Long),
+                InstructionZero::Rcl  => 0x3E | size_to_byte(&Size::Long),
             }
         }
         AstNode::OperationOne {size, instruction, ..} => {
@@ -1068,6 +1120,8 @@ fn instruction_to_byte(node: &AstNode) -> u8 {
                 InstructionTwo::Rta  => 0x39 | size_to_byte(size),
                 InstructionTwo::In   => 0x0B | size_to_byte(size),
                 InstructionTwo::Out  => 0x1B | size_to_byte(size),
+                InstructionTwo::Ldl => 0x0E | size_to_byte(size),
+                InstructionTwo::Bind => 0x1E | size_to_byte(size),
             }
         }
         _ => panic!("Attempting to parse a non-instruction AST node as an instruction: {:#?}", node),
@@ -1081,7 +1135,7 @@ fn condition_source_destination_to_byte(node: &AstNode) -> u8 {
             match operand.as_ref() {
                 AstNode::Register(_) => 0x00,
                 AstNode::RegisterPointer(_) => 0x01,
-                AstNode::Immediate8(_) | AstNode::Immediate16(_) | AstNode::Immediate32(_) | AstNode::LabelOperand {..} => 0x02,
+                AstNode::Immediate8(_) | AstNode::Immediate16(_) | AstNode::Immediate32(_) | AstNode::Immediate64(_) | AstNode::LabelOperand {..} => 0x02,
                 AstNode::ImmediatePointer(_) | AstNode::LabelOperandPointer {..} => 0x03,
                 _ => panic!("Attempting to parse a non-instruction AST node as an instruction: {:#?}", node),
             }
@@ -1090,7 +1144,7 @@ fn condition_source_destination_to_byte(node: &AstNode) -> u8 {
             match rhs.as_ref() {
                 AstNode::Register(_) => 0x00,
                 AstNode::RegisterPointer(_) => 0x01,
-                AstNode::Immediate8(_) | AstNode::Immediate16(_) | AstNode::Immediate32(_) | AstNode::LabelOperand {..} => 0x02,
+                AstNode::Immediate8(_) | AstNode::Immediate16(_) | AstNode::Immediate32(_) | AstNode::Immediate64(_) | AstNode::LabelOperand {..} => 0x02,
                 AstNode::ImmediatePointer(_) | AstNode::LabelOperandPointer {..} => 0x03,
                 _ => panic!("Attempting to parse a non-instruction AST node as an instruction: {:#?}", node),
             }
@@ -1157,6 +1211,7 @@ fn generate_backpatch_immediate(name: &String, size: &Size, instruction: &Assemb
             Size::Byte => 0..1,
             Size::Half => 0..2,
             Size::Word => 0..4,
+            Size::Long => 0..8,
         };
         for _ in range {
             vec.push(0xAB);
@@ -1189,6 +1244,7 @@ fn node_to_immediate_values(node: &AstNode, instruction: &AssembledInstruction) 
                     AstNode::Immediate8      (immediate) => vec.push(immediate),
                     AstNode::Immediate16     (immediate) => vec.extend_from_slice(&immediate.to_le_bytes()),
                     AstNode::Immediate32     (immediate) => vec.extend_from_slice(&immediate.to_le_bytes()),
+                    AstNode::Immediate64     (immediate) => vec.extend_from_slice(&immediate.to_le_bytes()),
                     AstNode::ImmediatePointer(immediate) => vec.extend_from_slice(&immediate.to_le_bytes()),
 
                     AstNode::LabelOperand        {ref name, ref size, is_relative} => {
@@ -1197,7 +1253,7 @@ fn node_to_immediate_values(node: &AstNode, instruction: &AssembledInstruction) 
                     }
                     AstNode::LabelOperandPointer {ref name, is_relative} => {
                         std::mem::drop(vec);
-                        generate_backpatch_immediate(name, &Size::Word, instruction, is_relative);
+                        generate_backpatch_immediate(name, &Size::Long, instruction, is_relative);
                     }
 
                     _ => panic!("Attempting to parse a non-instruction AST node as an instruction: {:#?}", node),
@@ -1212,6 +1268,7 @@ fn node_to_immediate_values(node: &AstNode, instruction: &AssembledInstruction) 
                     AstNode::Immediate8      (immediate) => vec.push(immediate),
                     AstNode::Immediate16     (immediate) => vec.extend_from_slice(&immediate.to_le_bytes()),
                     AstNode::Immediate32     (immediate) => vec.extend_from_slice(&immediate.to_le_bytes()),
+                    AstNode::Immediate64     (immediate) => vec.extend_from_slice(&immediate.to_le_bytes()),
                     AstNode::ImmediatePointer(immediate) => vec.extend_from_slice(&immediate.to_le_bytes()),
 
                     AstNode::LabelOperand        {ref name, ref size, is_relative} => {
@@ -1220,7 +1277,7 @@ fn node_to_immediate_values(node: &AstNode, instruction: &AssembledInstruction) 
                     }
                     AstNode::LabelOperandPointer {ref name, is_relative} => {
                         std::mem::drop(vec);
-                        generate_backpatch_immediate(name, &Size::Word, instruction, is_relative);
+                        generate_backpatch_immediate(name, &Size::Long, instruction, is_relative);
                     }
 
                     _ => panic!("Attempting to parse a non-instruction AST node as an instruction: {:#?}", node),
@@ -1250,7 +1307,7 @@ fn node_to_immediate_values(node: &AstNode, instruction: &AssembledInstruction) 
                 }
                 AstNode::LabelOperandPointer {ref name, is_relative} => {
                     std::mem::drop(vec);
-                    generate_backpatch_immediate(name, &Size::Word, instruction, is_relative);
+                    generate_backpatch_immediate(name, &Size::Long, instruction, is_relative);
                 }
 
                 _ => panic!("Attempting to parse a non-instruction AST node as an instruction: {:#?}", node),
